@@ -4,20 +4,13 @@
 pipeline {
     environment {
         IMAGE_NAME = "staticwebsite"
+        APP_CONTAINER_PORT = "5000"
         APP_EXPOSED_PORT = "80"
         IMAGE_TAG = "latest"
         STAGING = "chocoapp-staging"
         PRODUCTION = "chocoapp-prod"
         DOCKERHUB_ID = "choco1992"
         DOCKERHUB_PASSWORD = credentials('dockerhub_password')
-        APP_NAME = "Landry"
-        STG_API_ENDPOINT = "http://ip10-0-29-6-cnsnalbk3ds0ll7h93n0-1993.direct.docker.labs.eazytraining.fr"
-        STG_APP_ENDPOINT = "http://ip10-0-29-6-cnsnalbk3ds0ll7h93n0-${PORT_EXPOSED}.direct.docker.labs.eazytraining.fr"
-        PROD_API_ENDPOINT = "http://ip10-0-29-7-cnsnalbk3ds0ll7h93n0-1993.direct.docker.labs.eazytraining.fr"
-        PROD_APP_ENDPOINT = "http://ip10-0-29-7-cnsnalbk3ds0ll7h93n0-${PORT_EXPOSED}.direct.docker.labs.eazytraining.fr"
-        INTERNAL_PORT = "80"
-        EXTERNAL_PORT = "${PORT_EXPOSED}"
-        CONTAINER_IMAGE = "${DOCKERHUB_ID}/${IMAGE_NAME}:${IMAGE_TAG}"
     }
     agent none
     stages {
@@ -25,7 +18,7 @@ pipeline {
            agent any
            steps {
               script {
-                sh 'docker build -t ${DOCKERHUB_ID}/$IMAGE_NAME:$IMAGE_TAG ./Mini-projet/'
+                sh 'docker build -t ${DOCKERHUB_ID}/$IMAGE_NAME:$IMAGE_TAG .'
               }
            }
        }
@@ -36,7 +29,7 @@ pipeline {
               sh '''
                   echo "Cleaning existing container if exist"
                   docker ps -a | grep -i $IMAGE_NAME && docker rm -f $IMAGE_NAME
-                  docker run --name $IMAGE_NAME -d -p $APP_EXPOSED_PORT:$INTERNAL_PORT  ${DOCKERHUB_ID}/$IMAGE_NAME:$IMAGE_TAG
+                  docker run --name $IMAGE_NAME -d -p $APP_EXPOSED_PORT:$APP_CONTAINER_PORT -e PORT=$APP_CONTAINER_PORT ${DOCKERHUB_ID}/$IMAGE_NAME:$IMAGE_TAG
                   sleep 5
               '''
              }
@@ -47,7 +40,7 @@ pipeline {
            steps {
               script {
                 sh '''
-                   curl -v 172.17.0.1:$APP_EXPOSED_PORT | grep -i "Dimension"
+                   curl 172.17.0.1 | grep -i "Dimension"
                 '''
               }
            }
@@ -76,40 +69,60 @@ pipeline {
           }
       }
 
-      stage('STAGING - Deploy app') {
-      agent any
-      steps {
-          script {
-            sh """
-              echo  {\\"your_name\\":\\"${APP_NAME}\\",\\"container_image\\":\\"${CONTAINER_IMAGE}\\", \\"external_port\\":\\"${EXTERNAL_PORT}90\\", \\"internal_port\\":\\"${INTERNAL_PORT}\\"}  > data.json 
-              curl -k -v -X POST http://${STG_API_ENDPOINT}/staging -H 'Content-Type: application/json'  --data-binary @data.json  2>&1 | grep 200
-            """
-          }
+      stage('Push image in staging and deploy it') {
+        when {
+            expression { GIT_BRANCH == 'origin/main' }
         }
-     
-     }
-     stage('PROD - Deploy app') {
-       when {
-           expression { GIT_BRANCH == 'origin/master' }
-       }
-     agent any
+	agent {
+        	docker { image 'franela/dind' }
+	}
 
+        environment {
+            HEROKU_API_KEY = credentials('heroku_api_key')
+        }
+        steps {
+           script {
+             sh '''
+                apk --no-cache add npm
+                npm install -g heroku
+                heroku container:login
+                heroku create $STAGING || echo "projets already exist"
+                heroku container:push -a $STAGING web
+                heroku container:release -a $STAGING web
+             '''
+           }
+        }
+     }
+     stage('Push image in production and deploy it') {
+       when {
+           expression { GIT_BRANCH == 'origin/main' }
+       }
+	agent {
+        	docker { image 'franela/dind' }
+	}
+       environment {
+           HEROKU_API_KEY = credentials('heroku_api_key')
+       }
        steps {
           script {
-            sh """
-              echo  {\\"your_name\\":\\"${APP_NAME}\\",\\"container_image\\":\\"${CONTAINER_IMAGE}\\", \\"external_port\\":\\"${EXTERNAL_PORT}\\", \\"internal_port\\":\\"${INTERNAL_PORT}\\"}  > data.json 
-              curl -k -v -X POST http://${PROD_API_ENDPOINT}/prod -H 'Content-Type: application/json'  --data-binary @data.json  2>&1 | grep 200
-            """
+            sh '''
+               apk --no-cache add npm
+               npm install -g heroku
+               heroku container:login
+               heroku create $PRODUCTION || echo "projets already exist"
+               heroku container:push -a $PRODUCTION web
+               heroku container:release -a $PRODUCTION web
+            '''
           }
        }
      }
   }
   post {
        success {
-         slackSend (color: '#00FF00', message: "NAME - SUCCESSFUL: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]' (${env.BUILD_URL}) - PROD URL => http://${PROD_APP_ENDPOINT} , STAGING URL => http://${STG_APP_ENDPOINT}")
+         slackSend (color: '#00FF00', message: "SUCCESSFUL: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]' (${env.BUILD_URL})")
          }
       failure {
-            slackSend (color: '#FF0000', message: "NAME - FAILED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]' (${env.BUILD_URL})")
+            slackSend (color: '#FF0000', message: "FAILED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]' (${env.BUILD_URL})")
           }   
-    }  
+    }
 }
